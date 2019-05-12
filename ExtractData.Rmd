@@ -1,0 +1,257 @@
+---
+title: "Query Clinical Trials"
+author: "Sachin Mathur"
+date: "April 24, 2019"
+output: html_document
+---
+
+# Set Home directory
+```{r}
+
+require(knitr)
+knitr::opts_knit$set(root.dir = 'C:/Users/mathus07/Desktop/e-89/Project/Data/')
+
+```
+# Libraries
+```{r}
+library('ROracle')
+library('DBI')
+library('dplyr')
+library('stringr')
+library('RPostgreSQL')
+
+
+```
+
+# Database Connection
+```{r}
+
+drv <- dbDriver('PostgreSQL')
+con <- dbConnect(drv, dbname="aact",host="aact-db.ctti-clinicaltrials.org", port=5432, user="xxxxxxx", password="xxxxxxx")
+
+```
+
+#Functions
+
+##extract_criteria
+```{r}
+
+extract_criteria <- function(nct_id,txt){
+  x <- txt
+  #Remove Newlines
+  x <- gsub("[\r\n]", "", x)
+  #Split into inclusion and exclusion criteria
+  l1 <- str_locate(x, "Inclusion Criteria:")
+  l2 <- str_locate(x, "Exclusion Criteria:")
+  x1 <- substr(x,l1[2]+1,l2[1]-1)
+  x2 <- substr(x,l2[2]+1,nchar(x))
+  
+  #Extract individual criteria
+  #Inclusion
+  w1 <- unlist(strsplit(x1,"  -  "))
+  #Remove Extra space
+  w1 <- gsub("\\s+", " ", str_trim(w1)); w1 <- w1[!w1 %in% ""];
+  #Exclusion
+  w2 <- unlist(strsplit(x2,"  -  "))
+  #Remove Extra space
+  w2 <- gsub("\\s+", " ", str_trim(w2)); w2 <- w2[!w2 %in% ""];
+  #In case of empty
+  if(length(w1) == 0){
+    w1 = NA
+  }
+  if(length(w2) == 0){
+    w2 = NA
+  }
+  
+  n <- rbind(data.frame(nct_id = nct_id, type = "inclusion", txt = w1), data.frame(nct_id = nct_id, type = "exclusion", txt = w2))
+  return(n)
+}
+
+
+
+```
+##extract_criteria_Numbered
+```{r}
+extract_criteria_Numbered <- function(t){
+  x <- as.character(t$txt)
+  #Add a space at the begining of the string
+  x <- str_pad(string = x,side = "left", width = nchar(x)+1)
+  k <- unlist(strsplit(x," [0-9]\\. "))
+  #k <- unlist(strsplit(x," [[:digit:]]\\. "))
+  if(length(unlist(strsplit(k[length(k)]," [0-9][0-9]\\. ")))>0){
+    k1 <- unlist(strsplit(k[length(k)]," [0-9][0-9]\\. "))
+    k <- append(k,k1)
+  }
+  k <- k[!k == ""]
+  
+  n <- data.frame(nct_id = t$nct_id, type = t$type, txt = k)
+  return(n)
+}
+
+```
+
+#Query & Test Cases
+```{r}
+sql <- "select distinct downcase_mesh_term from browse_conditions"
+s <- dbGetQuery(con,sql)
+dis <- as.vector(s[,1])
+dis[grep("alzhei",dis)]
+dis[grep("breast",dis)]
+dis[grep("liver",dis)]
+
+#Extract all Study IDs
+sql <- "select nct_id from browse_conditions"
+s <- dbGetQuery(con,sql)
+all_id <- unique(as.vector(s[,1]))
+length(all_id)
+
+#Select only studies 
+sql <- "select nct_id,study_type,phase,is_fda_regulated_drug,start_month_year from studies"
+s <- dbGetQuery(con,sql)
+unique(s$phase)
+s1 <- s[s$phase %in% c("Phase 2","Phase 2/Phase 3","Phase 3"),]
+unique(s1$study_type)
+s2 <- s1[s1$study_type %in% "Interventional",]
+s2$year <- substr(s2$start_month_year,nchar(s2$start_month_year)-3,nchar(s2$start_month_year))
+s2$year <- as.numeric(s2$year)
+s2 <- s2[s2$year >=2000,]
+all_st <- s2$nct_id; all_st <- all_st[!is.na(all_st)]
+
+#Extract Studies for Alzheimers
+sql <- "select nct_id from browse_conditions where downcase_mesh_term='alzheimer disease'"
+s <- dbGetQuery(con,sql)
+alz_id <- as.vector(s[,1]); alz_id <- alz_id[!is.na(alz_id)];
+alz_id <- intersect(alz_id,all_st)
+length(alz_id)
+set.seed(1234)
+alz_test <- sample(alz_id,100)
+
+#Extract Studies for Breast Cancer
+sql <- "select nct_id from browse_conditions where downcase_mesh_term='triple negative breast neoplasms'"
+s <- dbGetQuery(con,sql)
+bc_id <- as.vector(s[,1]); bc_id <- bc_id[!is.na(bc_id)];
+bc_id <- intersect(bc_id,all_st)
+length(bc_id)
+set.seed(1234)
+bc_test <- sample(bc_id,100)
+
+#Extract Studies for fatty liver
+sql <- "select nct_id from browse_conditions where downcase_mesh_term='fatty liver'"
+s <- dbGetQuery(con,sql)
+fl_id <- as.vector(s[,1]); fl_id <- fl_id[!is.na(fl_id)];
+fl_id <- intersect(fl_id,all_st)
+length(fl_id)
+set.seed(1234)
+fl_test <- sample(fl_id,100)
+
+test_cases <- union(alz_test,bc_test); test_cases <- union(test_cases,fl_test)
+w <- data.frame(nct_id = alz_test, disease = "alz")
+w <- rbind(w,data.frame(nct_id = bc_test, disease = "bc"))
+w <- rbind(w,data.frame(nct_id = fl_test, disease = "fl"))
+write.table(w,file="testset_nctid",sep='\t',quote=F,row.names=F)
+
+#Sampling 10000 records that include BC, Fatty liver and Alzheimers
+set.seed(1234)
+q <- sample(all_st,10000)
+q <- union(q,alz_id); q <- union(q,bc_id); q <- union(q,fl_id);
+q <- setdiff(q,test_cases)
+ids <- q
+length(ids)
+
+```
+
+#Extract Data
+```{r}
+ds <- data.frame()
+for(i in 1:length(ids)){
+  sql <- paste0("select criteria from eligibilities where nct_id='",ids[i],"'")
+  s <- dbGetQuery(con,sql)
+  s <- as.character(s[,1])
+  q <- extract_criteria(ids[i],s)
+  if(i ==1){
+    write.table(q,file="TrainingSet",sep='\t',quote=F,row.names=F)
+  } else {
+    write.table(q,file="TrainingSet",sep='\t',quote=F,row.names=F,col.names=F,append = T)
+  }
+  ds <- rbind(ds,q)
+}
+write.table(ds,"trainingSet",sep='\t',quote=F,row.names=F)
+
+
+
+```
+
+## Extract Numbered Criteria
+```{r}
+
+ds <- read.table(file="trainingSet",sep='\t',quote="",comment.char="",header=T)
+d <- ds[!is.na(ds$txt),]
+rownames(d) <- NULL
+k <- as.vector(d$txt)
+#Numbered criteria
+k1 <- grep(" [0-9]\\. ",k)
+d1 <- d[-k1,]; write.table(d1,file="trainingSet_filt",sep='\t',quote=F,row.names=F);
+for(i in 1:length(k1)){
+  w <- d[k1[i],]
+  q <- extract_criteria_Numbered(w)
+  write.table(q,file="trainingSet_filt",sep='\t',quote=F,row.names=F,col.names = F,append = T);
+  if(i %% 500 ==0){
+    print(i)
+  }
+  #d <- rbind(d,unique(q))
+}
+
+
+
+```
+
+
+#Extract Training Data
+```{r}
+bc <- data.frame(nct_id = bc_id, disease = "bc")
+fl <- data.frame(nct_id = fl_id, disease = "fl")
+alz <- data.frame(nct_id = alz_id, disease = "alz")
+k <- rbind(bc,fl); k <- rbind(k,alz);
+tr <- k[!k$nct_id %in% test_cases,]
+table(tr$disease)
+
+ds <- read.table(file="Data/trainingSet_filt",sep='\t',quote="",comment.char="",header=T,stringsAsFactors = F)
+tr <- merge(tr,ds)
+write.table(tr,file="Data/TrainingData.txt",sep='\t',quote=F,row.names=F)
+
+```
+
+
+# Extract TestSet Data
+```{r}
+
+f <- read.table(file="testset_nctid",sep='\t',header=T)
+
+ss <- data.frame()
+for(i in 1:nrow(f)){
+  sql <- paste0("select criteria from eligibilities where nct_id='",f$nct_id[i],"'")
+  s <- dbGetQuery(con,sql)
+  s <- as.character(s[,1])
+  q <- extract_criteria(f$nct_id[i],s)
+  ss <- rbind(ss,q)
+}
+
+#Taking care of numbered criteria
+d <- ss[!is.na(ss$txt),]
+rownames(d) <- NULL
+k <- as.vector(d$txt)
+#Numbered criteria
+k1 <- grep(" [0-9]\\. ",k)
+d1 <- d[-k1,]
+d2 <- data.frame()
+for(i in 1:length(k1)){
+  w <- d[k1[i],]
+  q <- extract_criteria_Numbered(w)
+  d2 <- rbind(d2,w)
+}
+d3 <- rbind(d1,d2)
+d3 <- merge(f,d3)
+write.table(d3,file="Data/TestData.txt",sep='\t',quote=F,row.names=F)
+
+```
+
